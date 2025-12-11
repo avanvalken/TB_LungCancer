@@ -1,0 +1,804 @@
+---
+title: "TB_LungCancer_BatchCorrect"
+author: "avanvalken"
+date: "2025-12-11"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+
+suppressPackageStartupMessages({
+  library(SummarizedExperiment)
+  library(edgeR)
+  library(sva)
+  library(SingleCellExperiment)
+  library(singleCellTK)
+  library(DESeq2)
+  library(TBSignatureProfiler)
+  library(DT)
+  #library(enrichR)
+  library(Rtsne)
+  library(umap)
+  library(ggplot2)
+  library(ComplexHeatmap)
+  library(tidyverse)
+  library(knitr)
+  library(kableExtra)
+  library(Cairo)
+})
+
+knitr::opts_chunk$set(cache = TRUE)
+knitr::opts_chunk$set(echo = FALSE)
+
+
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+
+# Load TB Failure data
+```{r}
+indata <- readRDS("data/combined_TBFailure_se.RDS")
+
+# Want to have 5% present rate
+indata <- indata[apply(assay(indata,"counts") != 0, 1, mean)>.2,] 
+
+# removing outlier based on PCA
+indata <- indata[,-which(colnames(indata) %in% c("10200107A0"))]
+
+colData(indata)$subjtype <- gsub("failure", "Failure", colData(indata)$subjtype)
+colData(indata)$subjtype <- as.factor(colData(indata)$subjtype)
+colData(indata)$batch <- as.factor(colData(indata)$batch)
+colData(indata)$visit <- as.factor(colData(indata)$visit)
+colData(indata)$visit_type <- as.factor(paste(colData(indata)$visit, colData(indata)$subjtype, sep = "_"))
+```
+
+
+# Batch correct
+
+## UMAP of uncorrected data
+```{r}
+assays(indata)
+indata_tmp <- mkAssay(indata,  log = TRUE)
+names(assays(indata_tmp)) <- c("counts", "log_counts", "cpm", "log_cpm")
+
+assay_type = "log_cpm"
+
+
+set.seed(1)
+umap_out <- umap(t(assay(indata_tmp,assay_type)))
+embedding <- as.data.frame(umap_out$layout)
+embedding$Class <- as.factor(indata_tmp$visit_type)
+embedding$batch <- as.factor(indata_tmp$batch)
+
+g <- ggplot(embedding, aes(x=V1, y=V2, color=Class, shape = batch, label = colnames(assay(indata_tmp, assay_type)))) + 
+  geom_point(size=3) + 
+  xlab("UMAP 1") + 
+  ylab("UMAP 2") + 
+  theme(plot.title = element_text(hjust = 0.5)) + 
+  ggtitle("UMAP Plot") #+ 
+ #geom_text(aes(label=rownames(embedding), label.size = 0.10),hjust=0, vjust=0)
+
+plot(g)
+
+# remove temporary object
+rm(indata_tmp)
+
+# rename g
+pre_batch_corrected_plot <- g
+```
+#### save
+```{r=}
+ggsave("outs/dimension_reduction/batchcorrect_plots/tb_fail_umap_log_cpm_pre-batch-corrected.png", plot=pre_batch_corrected_plot ,width=7, height=7)
+ggsave("outs/dimension_reduction/batchcorrect_plots/tb_fail_umap_log_cpm_pre-batch-corrected.svg", plot=pre_batch_corrected_plot, width=7, height=7)
+```
+
+## Batch correct on subjid and subjtype
+```{r}
+# matrix formula using visit and treatment status as cofactors
+modcombat <- model.matrix(~  as.factor(colData(indata)$visit) + colData(indata)$subjtype)
+
+# correct for batch effects
+combined_India.combatSeqCorrect <- ComBat_seq(assay(indata, "counts"),
+                                      colData(indata)$batch, group=NULL,
+                                      covar_mod=modcombat)
+
+# add batch corrected assay to indata
+assay(indata, "combatseq") <- combined_India.combatSeqCorrect
+assays(indata)
+
+# make log_counts/logcpm
+indata <- mkAssay(indata, input_name = "combatseq", log = TRUE)
+names(assays(indata)) # check names
+names(assays(indata)) <- c("counts", "combatseq", "log_counts", "cpm", "log_cpm") # rename assays for convenience
+
+# remove for memory
+rm(modcombat, combined_India.combatSeqCorrect)
+```
+
+
+
+## UMAP on adjusted data
+
+```{r}
+assay_type = "log_cpm"
+
+set.seed(1)
+umap_out <- umap(t(assay(indata,assay_type)))
+
+embedding <- as.data.frame(umap_out$layout)
+embedding$Class <- as.factor(indata$subjtype)
+embedding$batch <- as.factor(indata$batch)
+#embedding$visit <- as.factor(indata$visit_type)
+
+g <- ggplot(embedding, aes(x=V1, y=V2, color=Class, shape = batch,label = colnames(assay(indata, assay_type)))) + 
+  geom_point(size=3) + 
+  xlab("UMAP 1") + 
+  ylab("UMAP 2") + 
+  theme(plot.title = element_text(hjust = 0.5)) + 
+  ggtitle("UMAP Plot") #+ 
+ #geom_text(aes(label=rownames(embedding), label.size = 0.10),hjust=0, vjust=0)
+
+plot(g)
+
+ggsave("outs/dimension_reduction/batchcorrect_plots/tb_fail_umap_log_cpm_post-batch-corrected.png", width=7, height=7)
+ggsave("outs/dimension_reduction/batchcorrect_plots/tb_fail_umap_log_cpm_post-batch-corrected.svg", width=7, height=7)
+```
+
+```{r}
+assay_type = "log_cpm"
+set.seed(1)
+umap_out <- umap(t(assay(indata,assay_type)))
+embedding <- as.data.frame(umap_out$layout)
+embedding$Class <- as.factor(indata$visit_type)
+embedding$batch <- as.factor(indata$batch)
+
+g <- ggplot(embedding, aes(x=V1, y=V2, color=Class, shape = batch, label = colnames(assay(indata, assay_type)))) + 
+  geom_point(size=3) + 
+  xlab("UMAP 1") + 
+  ylab("UMAP 2") + 
+  theme(plot.title = element_text(hjust = 0.5)) + 
+  ggtitle("UMAP Plot") #+ 
+ #geom_text(aes(label=rownames(embedding), label.size = 0.10),hjust=0, vjust=0)
+
+plot(g)
+ggsave("outs/dimension_reduction/batchcorrect_plots/tb_fail_umap_log_cpm_post-batch-corrected_visit_type.png", width=7, height=7)
+ggsave("outs/dimension_reduction/batchcorrect_plots/tb_fail_umap_log_cpm_post-batch-corrected_visit_type.svg", width=7, height=7)
+```
+
+
+## Add duplicates together for 1 batch
+
+### Combine duplicates
+```{r}
+
+df <- as.data.frame(colData(indata))
+mat <- as.matrix(assay(indata, "combatseq"))
+
+dmat <- mat
+# get list of duplicated subjid's, X column
+
+doubled <- df[duplicated(df$subjid), c('subjid', "X")]
+
+x <- which( colnames(mat) %in% doubled$subjid)
+y <- which( colnames(mat) %in% doubled$X)
+
+
+
+# add columns of counts for those id's
+
+mat[,"10200129A0"] <- rowSums(mat[,c("10200129A0", "X_10200129A0")])
+mat[,"10200133A0"] <- rowSums(mat[,c("10200133A0", "X_10200133A0")])
+mat[,"10200169A0"] <- rowSums(mat[,c("10200169A0", "X_10200169A0")])
+mat[,"10200184A0"] <- rowSums(mat[,c("10200184A0", "X_10200184A0")])
+mat[,"10200207A0"] <- rowSums(mat[,c("10200207A0", "X_10200207A0")])
+mat[,"10200208A"] <- rowSums(mat[,c("10200208A", "X_10200208A0")])
+mat[,"10200215A0"] <- rowSums(mat[,c("10200215A0", "X_10200215A0")])
+mat[,"10200219A0"] <- rowSums(mat[,c("10200219A0", "X_10200219A0")])
+mat[,"10200230A0"] <- rowSums(mat[,c("10200230A0", "X_10200230A0")])
+mat[,"10200248A0"] <- rowSums(mat[,c("10200248A0", "X_10200248A0")])
+mat[,"10200253A0"] <- rowSums(mat[,c("10200253A0", "X_10200253A0")])
+mat[,"10200265A0"] <- rowSums(mat[,c("10200265A0", "X_10200265A0")])
+mat[,"10200266A0"] <- rowSums(mat[,c("10200266A0", "X_10200266A0")])
+mat[,"10200274A0"] <- rowSums(mat[,c("10200274A0", "X_10200274A0")])
+mat[,"10200280A0"] <- rowSums(mat[,c("10200280A0", "X_10200280A0")])
+mat[,"10200309A0"] <- rowSums(mat[,c("10200309A0", "X_10200309A0")])
+mat[,"10200318A0"] <- rowSums(mat[,c("10200318A0", "X_10200318A0")])
+mat[,"10200366A0"] <- rowSums(mat[,c("10200366A0", "X_10200366A0")])
+
+mat <- mat[,-y]
+
+
+# get rid of duplicates in coldata
+indata <- indata[,-which(colnames(indata) %in% doubled$X)]
+
+#matnames <- colnames(mat)
+#matnames <- gsub("X_", "", matnames)
+
+#colnames(mat) <- matnames
+
+
+
+
+# make assays using combined counts data
+indata <- SummarizedExperiment(assays= mat, colData = colData(indata))
+names(assays(indata)) <- "counts"
+
+indata <-  mkAssay(indata, log = TRUE)# this is the new indata object
+
+names(assays(indata)) <- c("counts", "log_counts", "cpm", "log_cpm")
+## extract CPM for CIBERSORT
+
+# cpm_Failure <- assay(indata, "cpm", withDimnames = TRUE)
+# 
+# outCibersort <- cbind(data.frame(GeneSymbol = row.names(cpm_Failure)), 
+#                      cpm_Failure)
+# row.names(outCibersort) <- NULL
+# head(outCibersort)
+# write.table(outCibersort, 
+#             file="expr_mat_tb_fail.txt", 
+#             quote=FALSE, sep='\t', col.names = TRUE, row.names = FALSE)
+saveRDS(indata, "data/tx_failure_batchcorrected_se.RDS")
+
+tx <- indata # save batch-corrected tx failure set as new variable
+```
+
+## UMAP on adjusted data, after combining same subjid/timepoint
+
+```{r umap-all}
+assay_type = "log_cpm"
+
+set.seed(1)
+umap_out <- umap(t(assay(indata,assay_type)))
+
+embedding <- as.data.frame(umap_out$layout)
+embedding$Class <- as.factor(indata$subjtype)
+embedding$batch <- as.factor(indata$batch)
+
+g <- ggplot(embedding, aes(x=V1, y=V2, color=Class, shape = batch, label = colnames(assay(indata, assay_type)))) + 
+  geom_point(size=3) + 
+  xlab("UMAP 1") + 
+  ylab("UMAP 2") + 
+  theme(plot.title = element_text(hjust = 0.5)) + 
+  ggtitle("UMAP Plot") #+ 
+ #geom_text(aes(label=rownames(embedding), label.size = 0.10),hjust=0, vjust=0)
+
+plot(g)
+ggsave("outs/dimension_reduction/batchcorrect_plots/tb_fail_umap_log_cpm_post-batch-corrected_combined_duplicates.svg", width=7, height=7)
+```
+```{r}
+assay_type = "log_cpm"
+set.seed(1)
+umap_out <- umap(t(assay(indata,assay_type)))
+embedding <- as.data.frame(umap_out$layout)
+embedding$Class <- as.factor(indata$visit_type)
+embedding$batch <- as.factor(indata$batch)
+
+g <- ggplot(embedding, aes(x=V1, y=V2, color=Class, shape = batch, label = colnames(assay(indata, assay_type)))) + 
+  geom_point(size=3) + 
+  xlab("UMAP 1") + 
+  ylab("UMAP 2") + 
+  theme(plot.title = element_text(hjust = 0.5)) + 
+  ggtitle("UMAP Plot") #+ 
+ #geom_text(aes(label=rownames(embedding), label.size = 0.10),hjust=0, vjust=0)
+
+plot(g)
+ggsave("outs/dimension_reduction/batchcorrect_plots/tb_fail_umap_log_cpm_post-batch-corrected_visit_type.png", width=7, height=7)
+ggsave("outs/dimension_reduction/batchcorrect_plots/tb_fail_umap_log_cpm_post-batch-corrected_visit_type.svg", width=7, height=7)
+```
+
+# load TB Nutrition Data
+```{r load data, include=FALSE}
+
+#indata is a SingleCellExperiment object
+indata <- readRDS("data/new_nutrition_SCE.rds") # formerly new_indata_SCE.rds
+
+
+# correcting colData
+df <- readxl::read_xlsx("data/subject_coldata_cc_excel.xlsx")
+df <- column_to_rownames(df, var="...1")
+# 
+
+
+#change these to "well" because of his age;
+relabel <- c( "10200350B")
+
+ df[(match(relabel, df$SUBJID)), "bmi_cat2"] <- "well"
+ df[(match(relabel, df$SUBJID)), "status"] <- "LTBI_well"
+
+# change these to "mal"
+  mal_list <- c("10200082A","10200111A")
+ #
+ df[(match(mal_list, df$SUBJID)), "bmi_cat2"] <- "mal"
+ df[(match(mal_list, df$SUBJID)), "status"] <- "LTBI_mal"
+
+
+
+df$bmi_cat2 <- as.factor(df$bmi_cat2)
+df$status <- as.factor(df$status)
+df$age <- as.numeric(df$age)
+
+
+ # change colData to updated list (with ages fixed)
+colData(indata) <- DataFrame(df)
+
+indata <- as(indata, "SummarizedExperiment") # change to SE object
+
+## Removing Outliers
+indata <- indata[,-which(colnames(indata) %in% c("10200459B","10200335A","10200332A"))]
+
+
+
+# change ages
+#colData(indata)$new_age <- df$age
+
+# Want to have 5% present rate
+indata <- indata[apply(assay(indata,"counts") != 0, 1, mean)>.2,] 
+
+
+## Correct some errors in metadata
+colData(indata)$Tb_status[grep("074", colnames(indata))] <- "LTBI"
+colData(indata)$Tb_status[grep("082", colnames(indata))] <- "LTBI"
+colData(indata)$Tb_status[grep("111", colnames(indata))] <- "LTBI"
+
+
+
+
+
+## Make CPM and log_cpm
+#indata  = mkAssay(indata, log = TRUE, counts_to_CPM = TRUE)
+#assays(indata)
+
+
+
+## rename certain labels
+colData(indata)$Tb_status <- factor(gsub("activeTB", "TB", as.character(colData(indata)$Tb_status)))
+colData(indata)$bmi_cat2 <- factor(gsub("severely malnourished", "mal", gsub("well nourished", "well", colData(indata)$bmi_cat2)))
+colData(indata)$status <- factor(paste(colData(indata)$Tb_status, colData(indata)$bmi_cat2, sep="_"))
+table(colData(indata)$status)
+
+
+colData(indata)$bmi_cat2[grep("082", colnames(indata))] <- factor("mal")
+colData(indata)$status[grep("082", colnames(indata))] <- factor("LTBI_mal")
+
+colData(indata)$bmi_cat2[grep("111", colnames(indata))] <- factor("mal")
+colData(indata)$status[grep("111", colnames(indata))] <- factor("LTBI_mal")
+
+
+```
+
+### ComBat Batch correction
+#### create batch variable
+```{r corrected data, message=FALSE, results='hide', include = FALSE}
+
+## Make batch variable
+batch=rep(1,ncol(indata))
+batch[colnames(indata) %in% c("10200247B")]=1
+batch[colnames(indata) %in% c("10200227B","10200346A","10200381A","10200308A","10200361A","10200365B","10200467B","10200341A","10200374A", "10200548B","10200343A","10200374B","10200346A","10200377A") ]=1
+batch[colnames(indata)%in% c("10200070A", "10200128A","10200056A", "10200075A","10200136A", "10200105A","10200034A","10200058A", "10200007A", "10200064A","10200159A","10200077A","10200073A","10200130A","10200181A","10200059A","10200040B","10200018B","10200065B","10200003B","10200024B","10200004B","10200009B","10200001B","10200057B","10200029B","10200077B","10200035B","10200061B","10200030B","10200063B","10200034B","10200010A","10200288A","10200082A","10200074A","10200060A","10200023A","10200140A","10200111A","10200112A","10200016A","10200015A","10200087A")]=2
+colData(indata)$batch <- factor(batch)
+rm(batch)
+```
+
+### Pre-batch correction plot
+```{r}
+assays(indata)
+indata_tmp <- mkAssay(indata,  log = TRUE)
+names(assays(indata_tmp)) <- c("counts", "log_counts", "cpm", "log_cpm")
+
+assay_type = "log_cpm"
+
+
+set.seed(1)
+umap_out <- umap(t(assay(indata_tmp,assay_type)))
+embedding <- as.data.frame(umap_out$layout)
+embedding$Class <- as.factor(indata_tmp$status)
+embedding$batch <- as.factor(indata_tmp$batch)
+
+g <- ggplot(embedding, aes(x=V1, y=V2, color=Class, shape = batch, label = colnames(assay(indata_tmp, assay_type)))) + 
+  geom_point(size=3) + 
+  xlab("UMAP 1") + 
+  ylab("UMAP 2") + 
+  theme(plot.title = element_text(hjust = 0.5)) + 
+  ggtitle("UMAP Plot") #+ 
+ #geom_text(aes(label=rownames(embedding), label.size = 0.10),hjust=0, vjust=0)
+
+plot(g)
+
+
+```
+```{r}
+ggsave("outs/dimension_reduction/batchcorrect_plots/tb_nutrition_umap_log_cpm_pre-batch-corrected.png", plot=g, width=7, height=7)
+ggsave("outs/dimension_reduction/batchcorrect_plots/tb_nutrition_umap_log_cpm_pre-batch-corrected.svg", plot=g, width=7, height=7)
+```
+
+
+
+### batch correction
+```{r}
+modcombat <- model.matrix(~colData(indata)$bmi_cat2+colData(indata)$Tb_status)
+
+combined_India.combatSeqCorrect <- ComBat_seq(assay(indata, "counts"),
+                                      colData(indata)$batch, group=NULL,
+                                      covar_mod=modcombat)
+
+assay(indata, "combatseq") <- combined_India.combatSeqCorrect
+assays(indata)
+indata <- mkAssay(indata, input_name = "combatseq", log = TRUE)
+
+names(assays(indata)) <- c("counts", "combatseq", "log_counts", "counts_cpm", "log_cpm")
+rm(modcombat, combined_India.combatSeqCorrect)
+
+
+```
+#### Post-batchcorrection
+```{r}
+assay_type = "log_cpm"
+
+
+set.seed(1)
+umap_out <- umap(t(assay(indata,assay_type)))
+embedding <- as.data.frame(umap_out$layout)
+embedding$Class <- as.factor(indata$status)
+embedding$batch <- as.factor(indata$batch)
+embedding$bmi_cat2 <- as.factor(indata$bmi_cat2)
+
+g <- ggplot(embedding, aes(x=V1, y=V2, color=Class, shape = batch, label = colnames(assay(indata, assay_type)))) + 
+  geom_point(size=3) + 
+  xlab("UMAP 1") + 
+  ylab("UMAP 2") + 
+  theme(plot.title = element_text(hjust = 0.5)) + 
+  ggtitle("UMAP Plot") #+ 
+ #geom_text(aes(label=rownames(embedding), label.size = 0.10),hjust=0, vjust=0)
+
+plot(g)
+
+
+```
+```{r}
+ggsave("outs/dimension_reduction/batchcorrect_plots/tb_nutrition_umap_log_cpm_post-batch-corrected.png", plot=g, width=7, height=7)
+ggsave("outs/dimension_reduction/batchcorrect_plots/tb_nutrition_umap_log_cpm_post-batch-corrected.svg", plot=g, width=7, height=7)
+```
+
+### Keep only well-nourished
+```{r filter, include=FALSE}
+indata = indata[,colData(indata)$bmi_cat2=="well"]
+dim(indata)
+table(colData(indata)$bmi_cat2)
+table(colData(indata)$status)
+
+```
+
+```{r}
+assay_type = "log_cpm"
+
+
+set.seed(1)
+umap_out <- umap(t(assay(indata,assay_type)))
+embedding <- as.data.frame(umap_out$layout)
+embedding$Class <- as.factor(indata$status)
+embedding$batch <- as.factor(indata$batch)
+embedding$bmi_cat2 <- as.factor(indata$bmi_cat2)
+
+g <- ggplot(embedding, aes(x=V1, y=V2, color=Class, shape = batch, label = colnames(assay(indata, assay_type)))) + 
+  geom_point(size=3) + 
+  xlab("UMAP 1") + 
+  ylab("UMAP 2") + 
+  theme(plot.title = element_text(hjust = 0.5)) + 
+  ggtitle("UMAP Plot") #+ 
+ #geom_text(aes(label=rownames(embedding), label.size = 0.10),hjust=0, vjust=0)
+
+plot(g)
+
+
+```
+```{r}
+ggsave("outs/dimension_reduction/batchcorrect_plots/tb_nutrition_umap_log_cpm_post-batch-corrected_mal-removed.png", plot=g, width=7, height=7)
+ggsave("outs/dimension_reduction/batchcorrect_plots/tb_nutrition_umap_log_cpm_post-batch-corrected_mal-removed.svg", plot=g, width=7, height=7)
+```
+
+# Batch correct Failure and Nutrition datasets
+## add batch2 variable and common colData variable
+```{r}
+# make new batch variable
+tx$batch2 <- rep(1)
+indata$batch2 <- rep(2)
+
+# add new "visit_type" to nutrtion dataset
+indata$visit_type <- ifelse(indata$Tb_status=="TB", "Baseline_Control", "LTBI")
+```
+
+## make sure gene names in rowdata are comparible
+```{r}
+library(SummarizedExperiment)
+library(AnnotationDbi)
+library(org.Hs.eg.db)  # for human
+library(org.Mm.eg.db)  # for mouse
+
+aggregate_SE_by_symbol <- function(SE, new_symbols, symbol_col = NULL) {
+  stopifnot(length(new_symbols) == nrow(SE))
+
+  # Group row indices by new symbol
+  split_idx <- split(seq_along(new_symbols), new_symbols)
+
+  # Aggregate all assays: sum rows within each symbol group
+  assays_list <- assays(SE)
+  aggregated_assays <- lapply(assays_list, function(mat) {
+    do.call(rbind, lapply(split_idx, function(idx) {
+      colSums(mat[idx, , drop = FALSE])
+    }))
+  })
+
+  # Aggregate rowData: keep the first row for each symbol
+  rd <- rowData(SE)
+  aggregated_rd <- do.call(rbind, lapply(split_idx, function(idx) {
+    rd[idx[1], , drop = FALSE]
+  }))
+  rownames(aggregated_rd) <- names(split_idx)
+
+  # Optionally update the symbol column
+  if (!is.null(symbol_col) && symbol_col %in% colnames(aggregated_rd)) {
+    aggregated_rd[[symbol_col]] <- rownames(aggregated_rd)
+  }
+
+  SummarizedExperiment(
+    assays  = aggregated_assays,
+    rowData = aggregated_rd,
+    colData = colData(SE)
+  )
+}
+harmonize_SE_gene_symbols <- function(SE1,
+                                      SE2,
+                                      species = c("human", "mouse"),
+                                      symbol_col = NULL,
+                                      aggregate_duplicates = TRUE) {
+  species <- match.arg(species)
+
+  orgDb <- switch(
+    species,
+    human = org.Hs.eg.db,
+    mouse = org.Mm.eg.db
+  )
+
+  # helper to get gene symbols from an SE
+  get_symbols <- function(SE) {
+    if (!is.null(symbol_col) && symbol_col %in% colnames(rowData(SE))) {
+      as.character(rowData(SE)[[symbol_col]])
+    } else {
+      rownames(SE)
+    }
+  }
+
+  genes1 <- get_symbols(SE1)
+  genes2 <- get_symbols(SE2)
+
+  all_genes <- unique(c(genes1, genes2))
+
+  # map old → updated using both ALIAS and SYMBOL
+  alias_map <- mapIds(
+    orgDb,
+    keys     = all_genes,
+    keytype  = "ALIAS",
+    column   = "SYMBOL",
+    multiVals = "first"
+  )
+
+  symbol_map <- mapIds(
+    orgDb,
+    keys     = all_genes,
+    keytype  = "SYMBOL",
+    column   = "SYMBOL",
+    multiVals = "first"
+  )
+
+  updated_all <- ifelse(
+    !is.na(symbol_map), symbol_map,
+    ifelse(!is.na(alias_map), alias_map, all_genes)
+  )
+  names(updated_all) <- all_genes
+
+  # helper to update one SE
+  update_one_SE <- function(SE, old_symbols) {
+    new_symbols <- updated_all[old_symbols]
+
+    if (aggregate_duplicates) {
+      SE <- aggregate_SE_by_symbol(SE, new_symbols, symbol_col = symbol_col)
+    } else {
+      if (!is.null(symbol_col) && symbol_col %in% colnames(rowData(SE))) {
+        rowData(SE)[[symbol_col]] <- new_symbols
+      }
+      rownames(SE) <- new_symbols
+    }
+
+    SE
+  }
+
+  SE1_new <- update_one_SE(SE1, genes1)
+  SE2_new <- update_one_SE(SE2, genes2)
+
+  mapping_df <- data.frame(
+    old_symbol     = all_genes,
+    updated_symbol = updated_all,
+    stringsAsFactors = FALSE
+  )
+
+  list(
+    SE1     = SE1_new,
+    SE2     = SE2_new,
+    mapping = mapping_df
+  )
+}
+
+```
+
+```{r}
+library(BiocGenerics)
+nut_tmp <- indata
+tx_tmp <- tx
+
+
+se <- harmonize_SE_gene_symbols(nut_tmp, tx_tmp, species = "mouse", aggregate_duplicates = T)
+
+# extract SE objects
+SE1_updated <- se$SE1
+SE2_updated <-  se$SE2
+
+# get common genes
+common_genes <- intersect(rownames(SE1_updated), rownames(SE2_updated))
+
+# filter only common genes
+SE1_aligned <- SE1_updated[common_genes, ]
+SE2_aligned <- SE2_updated[common_genes, ]
+
+mat1 <- assay(SE1_aligned, "combatseq")
+mat2 <- assay(SE2_aligned, "counts")
+
+counts <- cbind(mat1, mat2)
+
+# select useful columnmat2# select useful columns from the coldata
+nut.df <- as.data.frame(colData(nut_tmp)) %>% 
+               dplyr::select(c("SUBJID",
+                        "age", 
+                        "HC_SMOKHX",
+                        "sex" ,
+                        "riskyalc" ,
+                        "IC_SMOKHX" ,
+                        "diabetes",
+                        "Tb_status",
+                        "batch",
+                        "batch2",
+                        "visit_type") ) %>% 
+               rename("subjid"="SUBJID")
+tx.df <- as.data.frame(colData(tx))%>% 
+               dplyr::select(c("subjid",
+                        "visit", 
+                        "subjtype",
+                        "sex" ,
+                        "age",
+                        "riskyalc",
+                        "IC_SMOKHX" ,
+                        "diabetes",
+                        "batch",
+                        "batch2",
+                        "visit_type") ) %>% 
+               mutate(diabetes=as.character(diabetes))
+
+merged.df <- full_join(nut.df, tx.df, by=intersect(colnames(nut.df), colnames(tx.df)))
+
+
+# make combined se 
+
+## make sure counts are matching coldata
+colnames(counts) <- gsub("X_", "", colnames(counts))
+
+
+x <- colnames(counts)
+y <- merged.df$subjid
+all(x %in% y)
+z <- setdiff(x,y) #"10200208A"
+zz <- setdiff(y,x) #"10200208A0"
+
+colnames(counts) <- gsub("10200208A$", "10200208A0", colnames(counts)) #match the naming
+
+x <- colnames(counts)
+y <- merged.df$subjid
+all(x %in% merged.df$subjid)
+z <- setdiff(x,y) #"10200208A"
+zz <- setdiff(y,x) #"10200208A0" in the merged.df
+
+
+counts <- counts[, merged.df$subjid]
+
+combined.se <- SummarizedExperiment(assays=SimpleList(counts=counts),
+                                    colData=DataFrame(merged.df))
+```
+
+#### Pre-batchcorrection
+```{r}
+assay_type = "log_counts_cpm"
+indata_tmp <- combined.se
+names(assays(indata_tmp))
+
+indata_tmp <- mkAssay(indata_tmp, log=T)
+
+set.seed(1)
+umap_out <- umap(t(assay(indata_tmp,assay_type)))
+embedding <- as.data.frame(umap_out$layout)
+embedding$Class <- as.factor(indata_tmp$visit_type)
+embedding$batch <- as.factor(indata_tmp$batch2)
+
+g <- ggplot(embedding, aes(x=V1, y=V2, color=Class, shape = batch, label = colnames(assay(indata_tmp, assay_type)))) + 
+  geom_point(size=3) + 
+  xlab("UMAP 1") + 
+  ylab("UMAP 2") + 
+  theme(plot.title = element_text(hjust = 0.5)) + 
+  ggtitle("UMAP Plot") #+ 
+ #geom_text(aes(label=rownames(embedding), label.size = 0.10),hjust=0, vjust=0)
+
+plot(g)
+
+
+```
+```{r}
+ggsave("outs/dimension_reduction/batchcorrect_plots/combined_se_pre-batchcorrection_umap.png", plot=g, width=7, height=7)
+ggsave("outs/dimension_reduction/batchcorrect_plots/combined_se_pre-batchcorrection_umap.svg", plot=g, width=7, height=7)
+```
+
+
+### model for batch correction
+```{r}
+indata <- combined.se
+modcombat <- model.matrix(~colData(indata)$visit_type)
+
+combined_India.combatSeqCorrect <- ComBat_seq(assay(indata, "counts"),
+                                      colData(indata)$batch2, group=NULL,
+                                      covar_mod=modcombat)
+
+assay(indata, "combatseq") <- combined_India.combatSeqCorrect
+assays(indata)
+indata <- mkAssay(indata, input_name = "combatseq", log = TRUE)
+
+names(assays(indata)) <- c("counts", "combatseq", "log_counts", "counts_cpm", "log_cpm")
+rm(modcombat, combined_India.combatSeqCorrect)
+
+
+```
+
+
+
+#### Post-batchcorrection
+```{r}
+assay_type = "log_cpm"
+indata_tmp <- indata
+names(assays(indata_tmp))
+
+set.seed(1)
+umap_out <- umap(t(assay(indata_tmp,assay_type)))
+embedding <- as.data.frame(umap_out$layout)
+embedding$Class <- as.factor(indata_tmp$visit_type)
+embedding$batch <- as.factor(indata_tmp$batch2)
+
+g <- ggplot(embedding, aes(x=V1, y=V2, color=Class, shape = batch, label = colnames(assay(indata_tmp, assay_type)))) + 
+  geom_point(size=3) + 
+  xlab("UMAP 1") + 
+  ylab("UMAP 2") + 
+  theme(plot.title = element_text(hjust = 0.5)) + 
+  ggtitle("UMAP Plot") #+ 
+ #geom_text(aes(label=rownames(embedding), label.size = 0.10),hjust=0, vjust=0)
+
+plot(g)
+
+
+```
+
+```{r}
+ggsave("outs/dimension_reduction/batchcorrect_plots/combined_se_post-batchcorrection_umap.png", plot=g, width=7, height=7)
+ggsave("outs/dimension_reduction/batchcorrect_plots/combined_se_post-batchcorrection_umap.svg", plot=g, width=7, height=7)
+```
+
+# SessionInfo
+```{r}
+sessionInfo()
+```
+
+
+
