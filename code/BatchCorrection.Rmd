@@ -793,6 +793,7 @@ plot(g)
 ```{r}
 ggsave("outs/dimension_reduction/batchcorrect_plots/combined_se_post-batchcorrection_umap.png", plot=g, width=7, height=7)
 ggsave("outs/dimension_reduction/batchcorrect_plots/combined_se_post-batchcorrection_umap.svg", plot=g, width=7, height=7)
+saveRDS(indata,file.path("data", "combined_tx_nutrition_bc_se.RDS"))
 ```
 
 # SessionInfo
