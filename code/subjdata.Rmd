@@ -1,0 +1,86 @@
+---
+title: "Untitled"
+author: "avanvalken"
+date: "2026-02-07"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+suppressPackageStartupMessages({
+  library(SummarizedExperiment)
+  library(edgeR)
+  library(sva)
+  library(SingleCellExperiment)
+  library(singleCellTK)
+  library(DESeq2)
+  library(TBSignatureProfiler)
+  library(DT)
+  #library(enrichR)
+  library(Rtsne)
+  library(umap)
+  library(ggplot2)
+  library(ComplexHeatmap)
+  library(tidyverse)
+  library(knitr)
+  library(kableExtra)
+  library(Cairo)
+  library(readxl)
+})
+
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+# Load data
+```{r}
+files <- list.files("data/IndoVap", full.names = T)
+files <- lapply(files, readxl::read_xlsx)
+names(files) <- list.files("data/IndoVap")
+names(files) <- gsub(".xlsx", "", names(files))
+combined_tx_nutrition_bc_se <- readRDS("data/combined_tx_nutrition_bc_se.RDS")
+```
+
+# process colData
+```{r}
+coldata <- as.data.frame(colData(combined_tx_nutrition_bc_se))
+
+subjids <- coldata$subjid
+# get base of id's
+subjids <- gsub("A0|A2", "A", subjids)
+nut.tb <- coldata %>% filter(batch2==2 & Tb_status=="TB")
+nut.tb <- nut.tb$subjid
+
+tx.id <- coldata %>% filter(batch2==1)
+tx.id <- tx.id$subjid
+tx.id <- gsub("A0|A2", "A", tx.id)
+
+dup <- intersect(tx.id, nut.tb)
+
+# "10200136A" is a tx failure
+```
+
+# find all info relating to active TB from nutritional dataset
+```{r}
+nut.atb.ls <- lapply(df, )
+
+
+x <- sapply(files, colnames)
+any("SUBJID" %in% sapply(files, colnames))
+```
+
+# just look at tx compliance
+```{r}
+tx_compliance <- files$`13_TxCompliance`
+tx <- filter(tx_compliance, SUBJID %in% nut.tb)
+tx.fail <- filter(tx_compliance, SUBJID %in% tx.id)
+```
+
+
+# SessionInfo
+```{r}
+sessionInfo()
+```
+
+
+
+
+

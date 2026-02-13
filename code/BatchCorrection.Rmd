@@ -53,12 +53,50 @@ colData(indata)$visit_type <- as.factor(paste(colData(indata)$visit, colData(ind
 ```
 
 
+
+# Fixed mkAssay
+```{r}
+mkAssay <- function (SE_obj, input_name = "counts", output_name = NULL, 
+          log = FALSE, counts_to_CPM = TRUE, prior_counts = 3) 
+{
+  if (!(log || counts_to_CPM)) {
+    stop("At least counts_to_CPM or log must be TRUE.")
+  }
+  else if (!(input_name %in% names(SummarizedExperiment::assays(SE_obj)))) {
+    stop("input_name must be an assay in the SE_obj")
+  }
+  assay_main <- SummarizedExperiment::assay(SE_obj, input_name)
+  if (is.null(output_name)) 
+    output_name <- input_name
+  if (log) {
+    SummarizedExperiment::assay(SE_obj, paste("log", output_name, 
+                                              sep = "_"), withDimnames = FALSE) <- log(assay_main + prior_counts)
+  }
+  if (counts_to_CPM) {
+    data.norm <- edgeR::DGEList(counts = assay_main)
+    dge_data.norm <- edgeR::calcNormFactors(data.norm)
+    CPM_data.norm <- edgeR::cpm(dge_data.norm, log = FALSE)
+    SummarizedExperiment::assay(SE_obj, paste(output_name, 
+                                              "cpm", sep = "_"), withDimnames = FALSE) <- CPM_data.norm
+    if (log) {
+      logCPM_data.norm <- edgeR::cpm(dge_data.norm, log = TRUE, 
+                                     prior.count = prior_counts)
+      SummarizedExperiment::assay(SE_obj, paste("log", 
+                                                output_name, "cpm", sep = "_"), withDimnames = FALSE) <- logCPM_data.norm
+    }
+  }
+  return(SE_obj)
+}
+
+```
+
 # Batch correct
 
 ## UMAP of uncorrected data
 ```{r}
 assays(indata)
-indata_tmp <- mkAssay(indata,  log = TRUE)
+indata_tmp <- indata
+indata_tmp <- mkAssay(indata_tmp,  log = TRUE)
 names(assays(indata_tmp)) <- c("counts", "log_counts", "cpm", "log_cpm")
 
 assay_type = "log_cpm"
@@ -81,13 +119,13 @@ g <- ggplot(embedding, aes(x=V1, y=V2, color=Class, shape = batch, label = colna
 plot(g)
 
 # remove temporary object
-rm(indata_tmp)
+#rm(indata_tmp)
 
 # rename g
 pre_batch_corrected_plot <- g
 ```
 #### save
-```{r=}
+```{r}
 ggsave("outs/dimension_reduction/batchcorrect_plots/tb_fail_umap_log_cpm_pre-batch-corrected.png", plot=pre_batch_corrected_plot ,width=7, height=7)
 ggsave("outs/dimension_reduction/batchcorrect_plots/tb_fail_umap_log_cpm_pre-batch-corrected.svg", plot=pre_batch_corrected_plot, width=7, height=7)
 ```
@@ -321,8 +359,9 @@ df$age <- as.numeric(df$age)
  # change colData to updated list (with ages fixed)
 colData(indata) <- DataFrame(df)
 
-indata <- as(indata, "SummarizedExperiment") # change to SE object
-
+original_rownames <- rownames(indata)
+indata <- as(indata, "SummarizedExperiment")
+rownames(indata) <- original_rownames
 ## Removing Outliers
 indata <- indata[,-which(colnames(indata) %in% c("10200459B","10200335A","10200332A"))]
 
@@ -382,7 +421,8 @@ rm(batch)
 ### Pre-batch correction plot
 ```{r}
 assays(indata)
-indata_tmp <- mkAssay(indata,  log = TRUE)
+indata_tmp <- indata
+indata_tmp <- mkAssay(SE_obj= indata_tmp, input_name = "counts", log = TRUE)
 names(assays(indata_tmp)) <- c("counts", "log_counts", "cpm", "log_cpm")
 
 assay_type = "log_cpm"
@@ -505,6 +545,9 @@ indata$batch2 <- rep(2)
 
 # add new "visit_type" to nutrtion dataset
 indata$visit_type <- ifelse(indata$Tb_status=="TB", "Baseline_Control", "LTBI")
+
+colData(indata)$visit_type[grep("136", colnames(indata))] <- "Baseline_Failure"
+
 ```
 
 ## make sure gene names in rowdata are comparible
@@ -515,118 +558,177 @@ library(org.Hs.eg.db)  # for human
 library(org.Mm.eg.db)  # for mouse
 
 aggregate_SE_by_symbol <- function(SE, new_symbols, symbol_col = NULL) {
+  
+  # Ensure new_symbols is a character vector (not named)
+  new_symbols <- as.character(new_symbols)
+  
   stopifnot(length(new_symbols) == nrow(SE))
-
+  
+  # Remove rows with NA symbols
+  valid_idx <- !is.na(new_symbols) & new_symbols != ""
+  if (sum(!valid_idx) > 0) {
+    message(sprintf("Removing %d rows with NA/empty symbols", sum(!valid_idx)))
+    SE <- SE[valid_idx, ]
+    new_symbols <- new_symbols[valid_idx]
+  }
+  
   # Group row indices by new symbol
   split_idx <- split(seq_along(new_symbols), new_symbols)
-
+  
   # Aggregate all assays: sum rows within each symbol group
-  assays_list <- assays(SE)
+  assays_list <- SummarizedExperiment::assays(SE)
   aggregated_assays <- lapply(assays_list, function(mat) {
-    do.call(rbind, lapply(split_idx, function(idx) {
-      colSums(mat[idx, , drop = FALSE])
+    agg_mat <- do.call(rbind, lapply(split_idx, function(idx) {
+      if (length(idx) == 1) {
+        mat[idx, , drop = FALSE]
+      } else {
+        matrix(colSums(mat[idx, , drop = FALSE]), nrow = 1)
+      }
     }))
+    colnames(agg_mat) <- colnames(mat)
+    rownames(agg_mat) <- names(split_idx)
+    agg_mat
   })
-
+  
   # Aggregate rowData: keep the first row for each symbol
-  rd <- rowData(SE)
+  rd <- SummarizedExperiment::rowData(SE)
   aggregated_rd <- do.call(rbind, lapply(split_idx, function(idx) {
     rd[idx[1], , drop = FALSE]
   }))
   rownames(aggregated_rd) <- names(split_idx)
-
+  
   # Optionally update the symbol column
   if (!is.null(symbol_col) && symbol_col %in% colnames(aggregated_rd)) {
     aggregated_rd[[symbol_col]] <- rownames(aggregated_rd)
   }
-
-  SummarizedExperiment(
+  
+  SummarizedExperiment::SummarizedExperiment(
     assays  = aggregated_assays,
     rowData = aggregated_rd,
-    colData = colData(SE)
+    colData = SummarizedExperiment::colData(SE)
   )
 }
+
 harmonize_SE_gene_symbols <- function(SE1,
                                       SE2,
                                       species = c("human", "mouse"),
                                       symbol_col = NULL,
                                       aggregate_duplicates = TRUE) {
   species <- match.arg(species)
-
+  
   orgDb <- switch(
     species,
-    human = org.Hs.eg.db,
-    mouse = org.Mm.eg.db
+    human = org.Hs.eg.db::org.Hs.eg.db,
+    mouse = org.Mm.eg.db::org.Mm.eg.db
   )
-
-  # helper to get gene symbols from an SE
+  
+  # Helper to get gene symbols from an SE
   get_symbols <- function(SE) {
-    if (!is.null(symbol_col) && symbol_col %in% colnames(rowData(SE))) {
-      as.character(rowData(SE)[[symbol_col]])
+    if (!is.null(symbol_col) && symbol_col %in% colnames(SummarizedExperiment::rowData(SE))) {
+      as.character(SummarizedExperiment::rowData(SE)[[symbol_col]])
     } else {
       rownames(SE)
     }
   }
-
+  
   genes1 <- get_symbols(SE1)
   genes2 <- get_symbols(SE2)
-
+  
   all_genes <- unique(c(genes1, genes2))
-
-  # map old → updated using both ALIAS and SYMBOL
-  alias_map <- mapIds(
-    orgDb,
-    keys     = all_genes,
-    keytype  = "ALIAS",
-    column   = "SYMBOL",
-    multiVals = "first"
+  
+  message(sprintf("Mapping %d unique genes...", length(all_genes)))
+  
+  # Map old → updated using both ALIAS and SYMBOL
+  # Suppress warnings about missing keys
+  alias_map <- suppressMessages(
+    AnnotationDbi::mapIds(
+      orgDb,
+      keys = all_genes,
+      keytype = "ALIAS",
+      column = "SYMBOL",
+      multiVals = "first"
+    )
   )
-
-  symbol_map <- mapIds(
-    orgDb,
-    keys     = all_genes,
-    keytype  = "SYMBOL",
-    column   = "SYMBOL",
-    multiVals = "first"
+  
+  symbol_map <- suppressMessages(
+    AnnotationDbi::mapIds(
+      orgDb,
+      keys = all_genes,
+      keytype = "SYMBOL",
+      column = "SYMBOL",
+      multiVals = "first"
+    )
   )
-
+  
+  # Build updated symbol vector
+  # Priority: official SYMBOL > ALIAS > keep original
   updated_all <- ifelse(
     !is.na(symbol_map), symbol_map,
     ifelse(!is.na(alias_map), alias_map, all_genes)
   )
   names(updated_all) <- all_genes
-
-  # helper to update one SE
-  update_one_SE <- function(SE, old_symbols) {
+  
+  # Report mapping stats
+  n_symbol <- sum(!is.na(symbol_map))
+  n_alias <- sum(is.na(symbol_map) & !is.na(alias_map))
+  n_unchanged <- sum(is.na(symbol_map) & is.na(alias_map))
+  message(sprintf("  - %d matched as official SYMBOL", n_symbol))
+  message(sprintf("  - %d matched via ALIAS", n_alias))
+  message(sprintf("  - %d not found (kept original)", n_unchanged))
+  
+  # Helper to update one SE
+  update_one_SE <- function(SE, old_symbols, se_name) {
+    
+    # Map each old symbol to new symbol
     new_symbols <- updated_all[old_symbols]
-
+    
+    # Handle any that weren't in the mapping (shouldn't happen, but safety)
+    missing <- is.na(new_symbols)
+    if (any(missing)) {
+      new_symbols[missing] <- old_symbols[missing]
+    }
+    
+    # Ensure it's an unnamed character vector of correct length
+    new_symbols <- unname(as.character(new_symbols))
+    
+    message(sprintf("Updating %s: %d rows → %d unique symbols", 
+                    se_name, nrow(SE), length(unique(new_symbols))))
+    
+    stopifnot(length(new_symbols) == nrow(SE))
+    
     if (aggregate_duplicates) {
       SE <- aggregate_SE_by_symbol(SE, new_symbols, symbol_col = symbol_col)
     } else {
-      if (!is.null(symbol_col) && symbol_col %in% colnames(rowData(SE))) {
-        rowData(SE)[[symbol_col]] <- new_symbols
+      if (!is.null(symbol_col) && symbol_col %in% colnames(SummarizedExperiment::rowData(SE))) {
+        SummarizedExperiment::rowData(SE)[[symbol_col]] <- new_symbols
       }
       rownames(SE) <- new_symbols
     }
-
+    
     SE
   }
-
-  SE1_new <- update_one_SE(SE1, genes1)
-  SE2_new <- update_one_SE(SE2, genes2)
-
+  
+  SE1_new <- update_one_SE(SE1, genes1, "SE1")
+  SE2_new <- update_one_SE(SE2, genes2, "SE2")
+  
+  # Report final overlap
+  common <- length(intersect(rownames(SE1_new), rownames(SE2_new)))
+  message(sprintf("Final: %d genes in SE1, %d in SE2, %d in common",
+                  nrow(SE1_new), nrow(SE2_new), common))
+  
   mapping_df <- data.frame(
-    old_symbol     = all_genes,
-    updated_symbol = updated_all,
+    old_symbol = all_genes,
+    updated_symbol = unname(updated_all),
     stringsAsFactors = FALSE
   )
-
+  
   list(
-    SE1     = SE1_new,
-    SE2     = SE2_new,
+    SE1 = SE1_new,
+    SE2 = SE2_new,
     mapping = mapping_df
   )
 }
+
 
 ```
 
@@ -636,7 +738,7 @@ nut_tmp <- indata
 tx_tmp <- tx
 
 
-se <- harmonize_SE_gene_symbols(nut_tmp, tx_tmp, species = "mouse", aggregate_duplicates = T)
+se <- harmonize_SE_gene_symbols(nut_tmp, tx_tmp, species = "human", aggregate_duplicates = T)
 
 # extract SE objects
 SE1_updated <- se$SE1
@@ -794,6 +896,58 @@ plot(g)
 ggsave("outs/dimension_reduction/batchcorrect_plots/combined_se_post-batchcorrection_umap.png", plot=g, width=7, height=7)
 ggsave("outs/dimension_reduction/batchcorrect_plots/combined_se_post-batchcorrection_umap.svg", plot=g, width=7, height=7)
 saveRDS(indata,file.path("data", "combined_tx_nutrition_bc_se.RDS"))
+```
+
+```{r}
+library(org.Hs.eg.db)
+
+# Get all protein-coding genes
+protein_coding <- AnnotationDbi::select(
+  org.Hs.eg.db,
+  keys = keys(org.Hs.eg.db, keytype = "ENSEMBL"),
+  columns = c("SYMBOL", "GENETYPE"),
+  keytype = "ENSEMBL"
+) |>
+  dplyr::filter(GENETYPE == "protein-coding") |>
+  dplyr::pull(SYMBOL) |>
+  unique() |>
+  na.omit()
+
+# Filter SE
+keep <- rownames(indata) %in% protein_coding
+indata <- indata[keep, ]
+
+# Check
+dim(indata)
+saveRDS(indata,file.path("data", "combined_tx_nutrition_bc_se_protein_only.RDS"))
+```
+```{r}
+assay_type = "log_cpm"
+indata_tmp <- indata
+names(assays(indata_tmp))
+
+set.seed(1)
+umap_out <- umap(t(assay(indata_tmp,assay_type)))
+embedding <- as.data.frame(umap_out$layout)
+embedding$Class <- as.factor(indata_tmp$visit_type)
+embedding$batch <- as.factor(indata_tmp$batch2)
+
+g <- ggplot(embedding, aes(x=V1, y=V2, color=Class, shape = batch, label = colnames(assay(indata_tmp, assay_type)))) + 
+  geom_point(size=3) + 
+  xlab("UMAP 1") + 
+  ylab("UMAP 2") + 
+  theme(plot.title = element_text(hjust = 0.5)) + 
+  ggtitle("UMAP Plot") #+ 
+ #geom_text(aes(label=rownames(embedding), label.size = 0.10),hjust=0, vjust=0)
+
+plot(g)
+
+
+```
+
+```{r}
+ggsave("outs/dimension_reduction/batchcorrect_plots/combined_se_post-batchcorrection_umap_proteinonly.png", plot=g, width=7, height=7)
+ggsave("outs/dimension_reduction/batchcorrect_plots/combined_se_post-batchcorrection_umap_proteinonly.svg", plot=g, width=7, height=7)
 ```
 
 # SessionInfo
